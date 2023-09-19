@@ -1,0 +1,2173 @@
+---
+title: "TFSA ETF Portfolio"
+output: flexdashboard::flex_dashboard
+vertical_layout: scroll
+
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(PerformanceAnalytics)
+library(tidyquant)
+library(tidyverse)
+library(kableExtra)
+library(pander)
+library(reactablefmtr)
+library(viridis)
+library(RColorBrewer)
+library(tidyr)
+library(rsample)
+library(tsibble)
+library(viridis)
+library(ggplot2)
+library(CVXR)
+library(kableExtra)
+library(purrr)
+library(dplyr)
+library(timetk)
+library(tibble)
+library(ROI)
+library(ggplot2)
+library(quantmod)
+library(random)
+library(DEoptim)
+library(fPortfolio)
+library(PortfolioAnalytics)
+library(dplyr)
+library(dygraphs)
+library(plotly)
+library(xts)
+library(readxl)
+library(scales)
+library(quarks)
+library(formattable)
+library(RColorBrewer)
+library(DT)
+options(scipen = 999,digits = 4)
+
+library(future)
+library(furrr)
+# Use available cores for parallel processing
+plan(multisession)
+
+
+# Set a random seed for reproducibility
+set.seed(123)
+
+# Vector of stocks in my portfolio
+tickers <- c("ETFGGB.JO","STXDIV.JO","STXPRO.JO","STXRES.JO","STXQUA.JO","STXNDQ.JO",
+        "STXEMG.JO","STXFIN.JO","ETF5IT.JO","STXIND.JO","STXGVI.JO","STXWDM.JO","STX500.JO","SYGEU.JO","STXVEQ.JO")
+
+##################################################################
+# Extract the Price Data Clean and Calculate return
+##################################################################
+
+# Function to adjust specified columns in a data frame based on conditions
+adjust_prices_for_tickers <- function(df, price_columns) {
+    adjusted_data <- df
+    
+    for (col in price_columns) {
+        adjusted_column <- numeric(nrow(df))
+        
+        for (i in 1:nrow(df)) {
+            # Ensure that values are not NA before checking the condition
+            if (!is.na(df[i, col]) && !is.na(df[i - 1, col]) &&
+                (i > 1 && ((df[i - 1, col] - df[i, col]) / df[i - 1, col]) > 0.5)) {
+                adjusted_column[i] <- df[i - 1, col]
+            } else {
+                adjusted_column[i] <- df[i, col]
+            }
+        }
+        
+        adjusted_data[col] <- adjusted_column
+    }
+    
+    return(adjusted_data)
+}
+
+
+# Bind portfolio prices 
+portfolioPrices <- NULL
+for(ticker in tickers) {
+    portfolioPrices <- cbind(portfolioPrices,
+                             getSymbols.yahoo(ticker, from ='2018-05-01', periodicity = 'daily', auto.assign=FALSE)[,4])
+}
+
+# Columns representing prices for different tickers
+price_columns_to_adjust <- colnames(portfolioPrices)
+
+data <- portfolioPrices
+
+data  <-tibble::rownames_to_column(as.data.frame(data), "Date")
+
+# Apply the function to adjust prices for different tickers
+adjusted_data <- adjust_prices_for_tickers(data, price_columns = price_columns_to_adjust)
+
+# Convert wide dataframe to xts object
+portfolioPrices <- xts(adjusted_data[,-1], order.by = as.Date(adjusted_data[,1], format = "%Y-%m-%d"))
+
+# Portfolio returns
+portfolioReturns <- na.omit(ROC(portfolioPrices))
+
+library(zoo)
+
+# Smoothing returns using a moving average with a window of, say, 20 days
+smoothedReturns <- as.xts(apply(portfolioReturns, 2, function(column) rollmean(column, k = 20, fill = NA, align = "right")))
+
+
+########################################################################
+
+assets <- colnames(smoothedReturns)
+
+portf <- portfolio.spec(assets)
+portf <- add.constraint(portf, type="full_investment")
+portf <- add.constraint(portf, type="long_only")
+portf <- add.constraint(portf,type="box",min=0,max=0.35)
+portf <-add.objective(portf, type="return", name="mean")
+portf <- add.constraint(portf, type="drawdown", max=0.15)
+# Quarterly rebalancing with 5 year training period
+bt.opt1 <- optimize.portfolio.rebalancing(smoothedReturns, portf,
+optimize_method="ROI",
+rebalance_on="quarters",
+training_period=12,
+rolling_window =16)
+
+# Monthly rebalancing with 5 year training period and 4 year rolling window
+bt.opt2 <- optimize.portfolio.rebalancing(smoothedReturns, portf,
+optimize_method="ROI",
+rebalance_on="months",
+training_period=12,
+rolling_window=12)
+
+
+#########################################################################
+# Load Easy Equities data for TSFA account and Analyse Actual Performance
+#########################################################################
+
+
+# Import your transaction history (replace with your actual data)
+# Replace with your actual absolute file path
+file_path <- "C:/Users/user/Documents/My_Fund_Value/transactions.xlsx"
+
+# Import the transaction data from the Excel file
+transactions <- read_excel(file_path)
+
+# Convert Date column to Date format
+
+transactions$Date <- as.Date(transactions$Date)
+
+# Download historical price data from Yahoo Finance (replace with your asset and benchmark tickers)
+assets <- c("SYG4IR.JO", "STXEMG.JO", "STXWDM.JO", "STXFIN.JO", "STX40.JO", "STX500.JO","STXVEQ.JO")
+benchmark <- "^GSPC"  # S&P 500 as a benchmark
+
+getSymbols(assets, from = "2021-05-03")
+getSymbols(benchmark, from = "2021-05-03")
+
+# Calculate daily unit prices for assets in the portfolio
+unit_prices <- na.omit(merge(Ad(SYG4IR.JO), Ad(STXEMG.JO), Ad(STXWDM.JO), Ad(STXFIN.JO), Ad(STX40.JO), Ad(STX500.JO), Ad(STXVEQ.JO)))
+
+# Replace ".JO.Adjusted" with an empty string in column names
+colnames(unit_prices) <- sub("\\.JO\\.Adjusted", "", colnames(unit_prices))
+
+# Initialize portfolio value with cash inflow on each respective date
+portfolio_value <- numeric(0)  # Initialize an empty vector
+
+# Iterate through each cash inflow transaction
+cash_inflows <- transactions %>% 
+  filter(Transaction == "Cash Inflow")
+
+for (i in 1:nrow(cash_inflows)) {
+  inflow_date <- cash_inflows$Date[i]
+  inflow_amount <- cash_inflows$DebitCedit[i]
+  
+  # Calculate the cumulative cash inflow up to the current date
+  cumulative_inflow <- sum(cash_inflows$DebitCedit[cash_inflows$Date <= inflow_date])
+  
+  # Update the portfolio value with the cumulative inflow
+  portfolio_value <- c(portfolio_value, cumulative_inflow)
+}
+
+# Create new columns for Quantity and Price
+transactions$Quantity <- NA
+transactions$Price <- NA
+
+# Extract Quantity and Price from the Comment column
+for (i in 1:nrow(transactions)) {
+  comment <- transactions$Comment[i]
+  
+  # Use a modified regular expression to extract quantity and price
+  match <- regmatches(comment, regexec("([0-9.,]+) @ ([0-9,]+\\.[0-9]{2})", comment))
+  
+  if (length(match[[1]]) > 1) {
+    # Extract and convert quantity and price
+    quantity <- as.numeric(gsub(",", "", match[[1]][2]))
+    price <- as.numeric(gsub(",", "", match[[1]][3])) / 100
+    
+    # Update the data frame with the extracted values
+    transactions$Quantity[i] <- quantity
+    transactions$Price[i] <- price
+  }
+}
+
+# Mutate the "Ticker" column to "Cash" based on the "Comment" column
+transactions <- transactions %>%
+  mutate(
+    Ticker = case_when(
+      grepl("Broker Commission", Comment) |
+      grepl("Settlement and administration", Comment) |
+      grepl("Investor protection levy", Comment) |
+      grepl("Value Added Tax on costs", Comment) |
+      grepl("Dividend Witholding Tax Recovery", Comment) |
+      grepl("Interest", Comment) |
+      grepl("Cash Management Fee", Comment) |
+      grepl("VAT on Cash Management Fee", Comment) |
+      grepl("Reserved funds", Comment) |
+      grepl("ETF-Dividends", Comment) |
+      grepl("Foreign Dividends", Comment) |
+      grepl("Securities Interest", Comment) |
+      grepl("REIT Distribution", Comment) |
+      grepl("Dividend Witholding Tax Recovery", Comment) |
+      grepl("Foreign Dividend Withholding Tax", Comment) |
+      grepl("Corporate Action", Comment) |
+      grepl("Inter-account transfer", Comment) |
+      grepl("Account Balance", Comment) |
+      grepl("Issuer Portfolio Cost", Comment) ~ "Cash",  
+	  
+      TRUE ~ Ticker
+    )
+  )
+
+
+
+transactions <- transactions %>%
+  mutate(
+    Transaction = case_when(
+      grepl("Dividends", Comment) ~ "Dividends",
+      grepl("Fees", Comment) ~ "Fees",
+      grepl("Bought", Comment) ~ "Purchase",
+      grepl("Sold", Comment) ~ "Sale",
+      TRUE ~ Transaction
+    )
+  )
+
+Trades <- transactions %>%
+  filter(Transaction %in% c("Purchase", "Sale")) %>%
+  select(Date, Ticker,Transaction, Quantity)
+  
+  # Pivot the data frame to make Ticker values as column names
+Trades_data_wide <- Trades %>%
+  pivot_wider(names_from = Ticker, values_from = c(Quantity))
+
+# Remove .JO from column names
+colnames(Trades_data_wide) <- gsub(".JO", "", colnames(Trades_data_wide))
+
+unit_trades_df  <-tibble::rownames_to_column(as.data.frame(unit_prices), "Date")
+
+df_prices   <-tibble::rownames_to_column(as.data.frame(unit_prices), "Date")
+
+# Extract the "Date" column
+date_column <- df_prices$Date
+
+# Sort the remaining column names
+sorted_columns <- sort(colnames(df_prices)[-1])
+
+# Reorder the columns with "Date" at the beginning
+sorted_columns <- c("Date", sorted_columns)
+
+# Reassign the sorted column order to the data frame
+df_prices <- df_prices[, sorted_columns]
+
+
+ # Convert the "Date" column in unit_prices_df to date type
+df_prices$Date <- as.Date(df_prices$Date)
+
+# Print the data frame with sorted column names
+print(colnames(df_prices))
+
+
+# Convert the "Date" column in unit_prices_df to date type
+unit_trades_df$Date <- as.Date(unit_trades_df$Date)
+
+
+unit_trades_df <- unit_trades_df%>%select(Date)%>%left_join(Trades_data_wide,by="Date")
+
+unit_trades_df <- unit_trades_df %>%
+  mutate(
+    Transaction = ifelse(is.na(Transaction), "No Transactions", Transaction)
+  )
+  
+ # Replace all NA values in the entire data frame with 0
+unit_trades_df <- unit_trades_df %>%
+  mutate_all(~ifelse(is.na(.), 0, .))
+ 
+ # Convert the "Date" column in unit_prices_df to date type
+unit_trades_df$Date <- as.Date(unit_trades_df$Date)
+
+calculate_cumulative_quantity <- function(data) {
+  symbols <- colnames(data)[3:ncol(data)]
+  
+  for (symbol in symbols) {
+    cumulative_col <- paste0(symbol, "_Quantity")
+    data[, cumulative_col] <- cumsum(data[, symbol] * ifelse(data$Transaction == "Purchase", 1, -1))
+  }
+  
+  # Remove duplicates and keep the last row of each date
+  data <- data[!duplicated(data$Date, fromLast = TRUE), ]
+  
+  return(data)
+}
+
+# Call the function to calculate cumulative quantity for unit_trades_df
+unit_trades_df <- calculate_cumulative_quantity(unit_trades_df)
+
+
+
+selected_columns <- c("Date", grep("Quantity", colnames(unit_trades_df), value = TRUE))
+selected_data <- unit_trades_df[selected_columns]
+
+# Specify the number of decimal places you want
+decimal_places <- 4
+
+# Format the numeric columns in selected_data
+selected_data[, -1] <- lapply(selected_data[, -1], function(x) {
+  if(is.numeric(x)) {
+    format(x, nsmall = decimal_places)
+  } else {
+    x
+  }
+})
+
+
+
+# Remove "_Quantity" suffix from column names
+colnames(selected_data) <- gsub("_Quantity", "", colnames(selected_data))
+
+# Sort the columns after the "Date" column
+selected_data <- selected_data[, order(colnames(selected_data))]
+
+# Print the data frame with modified and sorted column names
+print(colnames(selected_data))
+
+df_quantity <- selected_data
+
+
+
+# Identify the common column names for prices and quantities (excluding the first Date column)
+common_columns <- intersect(colnames(df_prices)[-1], colnames(df_quantity)[-1])
+
+# Ensure that the common columns are numeric
+df_prices[common_columns] <- lapply(df_prices[common_columns], as.numeric)
+df_quantity[common_columns] <- lapply(df_quantity[common_columns], as.numeric)
+
+# Perform the element-wise multiplication (excluding the first Date column)
+market_value_df <- df_prices
+market_value_df[, common_columns] <- df_prices[, common_columns] * df_quantity[, common_columns]
+
+# Optional: Rename the columns to include "_Market_Value" suffix
+#colnames(market_value_df)[-1] <- paste0(common_columns, "_Market_Value")
+
+# Divide the market value by 100 and round to 2 decimal places
+market_value_df[, common_columns] <- round(market_value_df[, common_columns] / 100, 2)
+
+# Replace values less than 0.01 with 0
+market_value_df[market_value_df < 0.01] <- 0
+
+# Assuming common_columns contains the column names of the security values
+total_value <- rowSums(market_value_df[, common_columns])
+
+# Add the total_value as a new column to the DataFrame
+market_value_df$Total_Value <- total_value
+
+# Assuming you have already loaded your data into market_value_df
+
+# Calculate the total market value for each day
+total_market_value <- rowSums(market_value_df[, common_columns])
+
+# Create a dataframe with the Date column
+df_weights <- data.frame(Date = market_value_df$Date)
+
+# Calculate the weights for each security for each day
+for (col in common_columns) {
+  weight_col <- paste0(col, "_Weight")
+  df_weights[, weight_col] <- market_value_df[, col] / total_market_value
+}
+
+# Remove "_Weight" suffix from column names
+colnames(df_weights) <- gsub("_Weight", "", colnames(df_weights))
+
+# Check the modified column names
+print(colnames(df_weights))
+
+# Load the xts package if not already loaded
+if (!requireNamespace("xts", quietly = TRUE)) {
+  install.packages("xts")
+  library(xts)
+}
+
+# Assuming your data is in df_prices with columns "Date" and the security prices
+# Create an xts object with Date as the index
+xts_prices <- xts(df_prices[, -1], order.by = as.Date(df_prices$Date))
+
+# Calculate returns using ROC function
+returns_xts <- ROC(xts_prices, type = "discrete")
+
+# Print the first few rows of returns_xts
+head(returns_xts)
+
+
+# Replace NA values with 0 in returns_xts
+returns_xts_filled <- na.fill(returns_xts, 0)
+
+# Print the first few rows of returns_xts_filled
+head(returns_xts_filled)
+
+df_returns <- returns_xts_filled
+
+
+# Exclude the "Date" column and convert the remaining data to xts
+weights_xts <- xts(df_weights[, -1], order.by = as.Date(df_weights$Date, format = "%m/%d/%Y"))
+
+# Print the first few rows of weights_xts
+head(weights_xts)
+
+df_weights <- weights_xts
+
+# Calculate Portfolio Returns
+
+df_portfolio_ret <- Return.portfolio(df_returns, weights = df_weights)
+
+################################################################
+# garch VaR
+################################################################
+
+garch <- vwhs(x=df_portfolio_ret,p=0.99,lambda = 0.70,model = "GARCH",variance.model=list(model="sGARCH"))
+
+garch.sd <- garch$garchmod@fit$sigma
+
+garch.VaR <- -2.33*garch.sd
+
+
+
+ df_VaR <- df_portfolio_ret
+ # Assuming you have an xts object df_VaR and a vector garch.VaR
+ 
+ # Convert the xts object df_VaR to a data frame
+ df_VaR_df <- as.data.frame(df_VaR)
+ 
+ # Add the garch.VaR vector as a new column
+ df_VaR_df$garch.VaR <- garch.VaR
+ 
+# Now df_VaR_df contains both the original data from df_VaR and the garch.VaR column
+      
+df_VaR_df  <-tibble::rownames_to_column(as.data.frame(df_VaR_df), "Date")
+
+df_VaR_df$Date <- as.Date(df_VaR_df$Date)
+
+df_VaR_df <- xts::xts(df_VaR_df[,-1],order.by = df_VaR_df$Date)
+ 
+names(df_VaR_df)[1]<- "Daily Returns"
+names(df_VaR_df)[2]<- "Daily Value at Risk"
+
+df_VaR_df  <-tibble::rownames_to_column(as.data.frame(df_VaR_df), "Date")
+
+
+##################################################################################################
+# Calendar Returns
+##################################################################################################
+
+# Convert Daily Returns to monthly
+
+MonthlyReturns <- apply.monthly(df_portfolio_ret, Return.cumulative)
+
+# Table Calender Returns
+
+df_calendar <- table.CalendarReturns(MonthlyReturns, digits = 2, as.perc = TRUE, geometric = TRUE)
+
+df_calendar  <-tibble::rownames_to_column(as.data.frame(df_calendar), "Year")
+
+# Assuming you have a data frame df_calendar
+# Rename the column at a specific column number (e.g., column number 14)
+col_number_to_rename <- 14
+names(df_calendar)[col_number_to_rename] <- "Yearly"
+
+# Assuming you have a data frame df_calendar
+# Calculate cumulative returns and add them as a new column
+df_calendar$Cumulative.Returns <- cumsum(df_calendar$Yearly)
+col_number_to_rename <- 15
+names(df_calendar)[col_number_to_rename] <- "Cumulative"
+
+
+### Calculate contribution to Returns 
+
+df_ret_cont <- df_weights*df_returns
+
+df_ret_contribution <-  Return.cumulative(df_ret_cont)
+
+##########################################################################
+# 
+# Extract Look through Holdings
+#
+#########################################################################
+library(rvest)
+library(dplyr)
+library(stringr)
+
+# Get the HTML code of the web page STX40
+html <- read_html("https://satrix.co.za/products/product-details?id=44")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df_stx40 <- df
+
+# Selecting specific columns
+df_stx40 <- df_stx40[, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stx40)[5] <- "Identifier"
+
+# Updating the Identifier column values to "STX40"
+df_stx40$Identifier <- "STX40"
+
+# View the first few rows of the modified dataframe
+head(df_stx40)
+
+
+# View the data frame
+print(df)
+
+# Get the HTML code of the web page STXDIV
+html <- read_html("https://satrix.co.za/products/product-details?id=22")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df_stxdiv <- df
+
+# Selecting specific columns
+df_stxdiv <- df_stxdiv[, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxdiv)[5] <- "Identifier"
+
+# Updating the Identifier column values to "STX40"
+df_stxdiv$Identifier <- "STXDIV"
+
+# View the first few rows of the modified dataframe
+head(df_stxdiv)
+
+# Get the HTML code of the web page STXRES
+html <- read_html("https://satrix.co.za/products/product-details?id=27")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df_stxres <- df
+
+# Selecting specific columns
+df_stxres <- df_stxres[, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxres)[5] <- "Identifier"
+
+# Updating the Identifier column values to "StXRES"
+df_stxres$Identifier <- "STXRES"
+
+# View the first few rows of the modified dataframe
+head(df_stxres)
+
+# Get the HTML code of the web page STXPRO
+html <- read_html("https://satrix.co.za/products/product-details?id=35")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df_stxpro <- df
+
+# Selecting specific columns
+df_stxpro  <- df_stxpro [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxpro )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXPRO"
+df_stxpro $Identifier <- "STXPRO"
+
+# View the first few rows of the modified dataframe
+head(df_stxpro )
+
+# Get the HTML code of the web page STXGVI
+html <- read_html("https://satrix.co.za/products/product-details?id=84")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[7, ])
+df <- df[-(1:7), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df <- df %>%
+  mutate(
+    `SHARE NAME` = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", `SHARE NAME`),
+    INDUSTRY = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", INDUSTRY)
+  )
+
+df_stxgvi <- df
+
+# Selecting specific columns
+df_stxgvi  <- df_stxgvi [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxgvi )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXGVI"
+df_stxgvi $Identifier <- "STXGVI"
+
+# View the first few rows of the modified dataframe
+head(df_stxgvi )
+
+
+# Get the HTML code of the web page STXQUA
+html <- read_html("https://satrix.co.za/products/product-details?id=36")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df_stxqua <- df
+
+# Selecting specific columns
+df_stxqua  <- df_stxqua [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxqua )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXQUA"
+df_stxqua $Identifier <- "STXQUA"
+
+# View the first few rows of the modified dataframe
+head(df_stxqua )
+
+# Get the HTML code of the web page STXVEQ
+html <- read_html("https://satrix.co.za/products/product-details?id=95")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[7, ])
+df <- df[-(1:7), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df <- df %>%
+  mutate(
+    `SHARE NAME` = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", `SHARE NAME`),
+    INDUSTRY = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", INDUSTRY)
+  )
+
+df_stxveq <- df
+
+# Selecting specific columns
+df_stxveq  <- df_stxveq [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxveq )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXVEQ"
+df_stxveq $Identifier <- "STXVEQ"
+
+# View the first few rows of the modified dataframe
+head(df_stxveq )
+
+# Get the HTML code of the web page STXFIN
+html <- read_html("https://satrix.co.za/products/product-details?id=23")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df <- df %>%
+  mutate(
+    `SHARE NAME` = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", `SHARE NAME`),
+    INDUSTRY = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", INDUSTRY)
+  )
+
+df_stxfin <- df
+
+# Selecting specific columns
+df_stxfin  <- df_stxfin [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxfin )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXFIN"
+df_stxfin $Identifier <- "STXFIN"
+
+# View the first few rows of the modified dataframe
+head(df_stxfin )
+
+# Get the HTML code of the web page STXIND
+html <- read_html("https://satrix.co.za/products/product-details?id=24")
+
+# Extract Fund Identifier
+pattern <- "Market Capitalisation of (Satrix .*?)\n"
+matches <- str_match(html_text(html), pattern)
+if (!is.na(matches[1,2])) {
+  fund_identifier <- str_trim(matches[1,2])
+} else {
+  fund_identifier <- NA
+}
+
+# Scrape the table rows from the web page
+rows <- html_elements(html, css = "tr")
+
+# Extract data from rows
+data <- lapply(rows, function(row) {
+  columns <- html_children(row)
+  data <- html_text(columns)
+  return(data)
+})
+
+# Convert to a data frame
+df <- as.data.frame(do.call(rbind, data))
+
+# Exclude rows 1 to 7 and setting the 8th row as column names
+names(df) <- as.character(df[8, ])
+df <- df[-(1:8), ]
+
+# Filtering out rows based on 'SHARE NAME' column
+discard_index <- which(df$CODE == "SHARE NAME")
+if(length(discard_index) > 0) {
+  df <- df[1:(discard_index - 1), ]
+}
+
+# Adding the fund identifier as a new column
+df$Ticker <- fund_identifier
+
+# View the data frame
+print(df)
+
+# Convert the WEIGHT column to numeric format and divide by 100
+df$WEIGHT <- as.numeric(gsub("%", "", df$WEIGHT)) / 100
+
+df <- df %>%
+  mutate(
+    `SHARE NAME` = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", `SHARE NAME`),
+    INDUSTRY = ifelse(CODE %in% c("Cash Capital", "Cash Income"), "Cash", INDUSTRY)
+  )
+
+df_stxind <- df
+
+# Selecting specific columns
+df_stxind  <- df_stxind [, c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Ticker")]
+
+# Renaming the Ticker column to Identifier
+colnames(df_stxind )[5] <- "Identifier"
+
+# Updating the Identifier column values to "STXIND"
+df_stxind $Identifier <- "STXIND"
+
+# View the first few rows of the modified dataframe
+head(df_stxind )
+
+
+library(curl)
+
+# URL from which to download the CSV STXEMG
+url <- "https://www.ishares.com/uk/individual/en/products/264659/ishares-msci-emerging-markets-imi-ucits-etf/1506575576011.ajax?fileType=csv&fileName=EIMI_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "EIMI_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'STXEMG'
+df$Identifier <- "STXEMG"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_stxemg <- df
+
+# Selecting specific columns
+df_stxemg <- df_stxemg[, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_stxemg) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_stxemg)
+
+df_stxemg$WEIGHT <- df_stxemg$WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_stxemg)
+
+
+
+# URL from which to download the CSV STXWDM
+url <- "https://www.ishares.com/uk/individual/en/products/251882/ishares-msci-world-ucits-etf-acc-fund/1506575576011.ajax?fileType=csv&fileName=SWDA_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "SWDA_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'STXEMG'
+df$Identifier <- "STXWDM"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_stxwld <- df
+
+# Selecting specific columns
+df_stxwld <- df_stxwld[, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_stxwld) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_stxwld)
+
+df_stxwld$WEIGHT <- df_stxwld$WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_stxwld)
+
+# URL from which to download the CSV STX500
+url <- "https://www.ishares.com/uk/individual/en/products/253743/ishares-sp-500-b-ucits-etf-acc-fund/1506575576011.ajax?fileType=csv&fileName=CSPX_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "CSPX_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'STX500'
+df$Identifier <- "STX500"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_stx500 <- df
+
+# Selecting specific columns
+df_stx500<- df_stx500[, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_stx500) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_stx500)
+
+df_stx500$WEIGHT <- df_stx500$WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_stx500)
+
+# URL from which to download the CSV STXNDQ
+url <- "https://www.ishares.com/uk/individual/en/products/253741/ishares-nasdaq-100-ucits-etf/1506575576011.ajax?fileType=csv&fileName=CNDX_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "CNDX_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'STXNDQ'
+df$Identifier <- "STXNDQ"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_stxndq <- df
+
+# Selecting specific columns
+df_stxndq<- df_stxndq[, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_stxndq) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_stxndq)
+
+df_stxndq$WEIGHT <- df_stxndq$WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_stxndq)
+
+library(curl)
+library(readxl)
+library(bizdays)
+library(fs)  # for filesystem operations
+
+# Create a business calendar
+holidays <- as.Date(c("2023-01-01", "2023-12-25", "2023-12-26"))
+cal <- create.calendar(name='MyCalendar', weekdays=c('sunday', 'saturday'), adjust.from=adjust.next, adjust.to=adjust.next, holidays=holidays)
+bizdays.options$set(default.calendar=cal)
+
+# Get the current date
+current_date <- Sys.Date()
+offset_date <- offset(current_date, -2)
+formatted_date <- format(offset_date, "%Y%m%d")
+
+# Construct the URL and file names dynamically
+url <- paste0("https://sygnia-funds.s3.eu-west-2.amazonaws.com/SYGEU_Constituents_", formatted_date, ".xlsx")
+destination <- paste0("SYGEU_Constituents_", formatted_date, ".xlsx")
+backup_destination <- "SYGEU_Constituents_backup.xlsx"
+
+# Backup the last successful file before attempting to download
+if (file_exists(destination)) {
+  file_copy(destination, backup_destination, overwrite = TRUE)
+}
+
+# Attempt to download the xlsx
+tryCatch(
+  {
+    curl_download(url, destination)
+  },
+  error = function(e){
+    message("Error in download. Using the backup file.")
+    file_copy(backup_destination, destination, overwrite = TRUE)
+  }
+)
+
+# Read the xlsx skipping the first 15 rows
+df <- read_excel(destination, skip = 15)
+
+# Add a new column 'Ticker' with the identifier 'SYGEUQ'
+df$Identifier <- "SYGEUQ"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_sygeuq <- df
+# Rename columns
+names(df_sygeuq)[1] <- "CODE"
+names(df_sygeuq)[3] <- "SHARE NAME"
+names(df_sygeuq)[6] <- "WEIGHT"
+
+# Drop rows where 'CODE' is NA
+df_sygeuq <- df_sygeuq[!is.na(df_sygeuq$CODE), ]
+
+# Convert 'WEIGHT' column to numeric (removing any potential non-numeric characters like '%')
+df_sygeuq$WEIGHT <- as.numeric(gsub("[^0-9.]", "", df_sygeuq$WEIGHT)) / 100
+
+# View the first few rows of the modified dataframe
+head(df_sygeuq)
+
+# Remove everything from the period onwards in the CODE column
+df_sygeuq$CODE <- sub("\\..*$", "", df_sygeuq$CODE)
+
+# View the first few rows of the modified dataframe
+head(df_sygeuq)
+
+# Select the desired columns
+df_sygeuq <- df_sygeuq %>% 
+  select(CODE, `SHARE NAME`, WEIGHT, Identifier)
+
+# Add the 'INDUSTRY' column with NA values
+df_sygeuq$INDUSTRY <- NA
+
+
+# Rearrange the columns in the specified order
+df_sygeuq <- df_sygeuq %>%
+  select(CODE, `SHARE NAME`, INDUSTRY, WEIGHT, Identifier)
+
+# View the first few rows of the reordered dataframe
+head(df_sygeuq)
+
+
+# View the first few rows of the modified dataframe
+head(df_sygeuq)
+
+
+# URL from which to download the CSV ETFGGB
+url <- "https://www.ishares.com/uk/individual/en/products/251753/ishares-global-government-bond-ucits-etf/1506575576011.ajax?fileType=csv&fileName=IGLO_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "IGLO_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'ETFGGB'
+df$Identifier <- "ETFGGB"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_etfggb <- df
+
+# Selecting specific columns
+df_etfggb <- df_etfggb [, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_etfggb ) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_etfggb )
+
+df_etfggb $WEIGHT <- df_etfggb $WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_etfggb )
+
+# URL from which to download the CSV ETF5IT
+url <- "https://www.ishares.com/uk/individual/en/products/280510/ishares-sp-500-information-technology-sector-ucits-etf/1506575576011.ajax?fileType=csv&fileName=IUIT_holdings&dataType=fund"
+
+# Specify the destination file
+destination <- "IUIT_holdings.csv"
+
+# Download the CSV
+curl_download(url, destination)
+
+# Read the CSV skipping the first 2 rows
+df <- read.csv(destination, skip = 2)
+
+# Add a new column 'Ticker' with the identifier 'ETF5IT'
+df$Identifier <- "ETF5IT"
+
+# View the first few rows of the dataframe
+head(df)
+
+df_etf5it <- df
+
+# Selecting specific columns
+df_etf5it <- df_etf5it [, c("Ticker", "Name", "Sector", "Weight....", "Identifier")]
+
+# Renaming the columns
+colnames(df_etf5it ) <- c("CODE", "SHARE NAME", "INDUSTRY", "WEIGHT", "Identifier")
+
+# View the first few rows of the modified dataframe
+head(df_etf5it )
+
+df_etf5it $WEIGHT <- df_etf5it $WEIGHT / 100
+
+# View the first few rows of the modified dataframe
+head(df_etf5it )
+
+
+# Combine all data frames into one data frame
+combined_df <- bind_rows(df_etf5it, df_etfggb, df_stx40, df_stx500, df_stxdiv, 
+                         df_stxemg, df_stxfin, df_stxgvi, df_stxind, df_stxndq, 
+                         df_stxpro, df_stxqua, df_stxres, df_stxveq, df_stxwld, df_sygeuq)
+
+# View the combined data frame
+head(combined_df)
+
+# Remove rows with NAs from the combined dataframe
+combined_df<- combined_df %>%
+  filter(!is.na(WEIGHT))
+  
+
+library(stringdist)
+
+# Assuming you have a dataframe named combined_df
+
+# Convert the 'SHARE NAME' column to lowercase
+combined_df$`SHARE NAME` <- tolower(combined_df$`SHARE NAME`)
+
+# Remove 'ltd', 'ag', 'inc', and words with 'holdings'
+combined_df$modified_share_name <- gsub("\\bltd\\b|\\bag\\b|\\binc\\b|\\bholdings\\b|\\nv\\b", "", combined_df$`SHARE NAME`, ignore.case = TRUE)
+
+# Extract the first two words
+combined_df$first_two_words <- sapply(strsplit(combined_df$modified_share_name, " "), function(x) paste(head(x, 2), collapse = " "))
+
+# Compute a matrix of string distances using the first two words
+dist_matrix <- stringdist::stringdistmatrix(combined_df$first_two_words, combined_df$first_two_words, method = "jw")
+
+# Cluster the share names based on the distances of the first two words
+hc <- hclust(as.dist(dist_matrix))
+clusters <- cutree(hc, h=0.20)  # Adjust this height for your desired level of clustering
+
+# Add the clusters to the dataframe
+combined_df$cluster <- clusters
+
+# Determine a representative name for each cluster using the original 'SHARE NAME'
+representative_names <- combined_df %>%
+    group_by(cluster) %>%
+    summarize(representative_name = first(`SHARE NAME`))
+
+# Merge the representative names back to the original dataframe
+combined_df <- left_join(combined_df, representative_names, by = "cluster")
+
+# Clean up columns and select desired ones
+combined_df <- combined_df %>%
+    select(CODE, `SHARE NAME`, INDUSTRY, WEIGHT, Identifier, cluster, representative_name)
+
+combined_df <- combined_df %>%
+  mutate(representative_name = ifelse((CODE == "SAP" & `SHARE NAME` == "sap") | 
+                                      (CODE == "SAPG" & `SHARE NAME` == "sap"), 
+                                      "sap se", representative_name))
+
+
+
+
+#names(combined_df)[7]<-"representative_name"
+
+# Sum weights by representative share name and Identifier
+result <- combined_df %>%
+  group_by(representative_name, Identifier) %>%
+  summarise(Total_Weight = sum(WEIGHT, na.rm = TRUE))
+
+print(result)
+
+
+df_holding_weight <- result
+
+p_weights <- tail(df_weights,1)
+ df_transposed_pw <- t(p_weights )
+ df_transposed_pw <- as.data.frame(df_transposed_pw)
+ df_transposed_pw  <-tibble::rownames_to_column(df_transposed_pw,"Ticker")
+ names(df_transposed_pw)[2]<-"Holding"
+
+df_pw <- df_transposed_pw 
+
+
+colnames(df_pw)[1] <- "Identifier"
+colnames(df_pw)[2] <- "Portfolio_Weight"
+
+df_ret_lt <- df_weights*df_returns
+
+df_ret_lt <-  Return.cumulative(df_ret_lt)
+		 
+		 
+		 df_ret_trans_lt <- t(df_ret_lt )
+ 
+ df_ret_trans_lt <- as.data.frame(df_ret_trans_lt)
+ df_ret_trans_lt  <-tibble::rownames_to_column(df_ret_trans_lt, "Ticker")
+ 
+colnames(df_ret_trans_lt)[1] <- "Identifier"
+colnames(df_ret_trans_lt)[2] <- "Portfolio_Return"
+
+
+result_df <- left_join(df_holding_weight, df_pw, by = "Identifier")
+
+result_df$LookThrough_Weight <- (result_df$Total_Weight * result_df$Portfolio_Weight)*100
+
+result_df[is.na(result_df)] <- 0
+
+result_df <- left_join(result_df, df_ret_trans_lt, by = "Identifier")
+
+result_df$LookThrough_Return <- (result_df$LookThrough_Weight * result_df$Portfolio_Return)*100
+
+result_df[is.na(result_df)] <- 0
+
+df_lookthrough <- result_df%>%select(representative_name,LookThrough_Weight)
+
+colnames(df_lookthrough)[1] <- "Name"
+colnames(df_lookthrough)[2] <- "Weight"
+
+df_lookthrough <- df_lookthrough %>%
+    group_by(Name) %>%
+    summarise(Weight = sum(Weight, na.rm = TRUE))
+
+df_lookthrough_ret <- result_df%>%select(representative_name,LookThrough_Return)
+
+colnames(df_lookthrough_ret)[1] <- "Name"
+colnames(df_lookthrough_ret)[2] <- "Return"
+
+df_lookthrough_ret <- df_lookthrough_ret %>%
+    group_by(Name) %>%
+    summarise(Return = sum(Return, na.rm = TRUE))
+
+
+library(tools)
+
+df_lookthrough$Name <- tools::toTitleCase(df_lookthrough$Name)
+df_lookthrough_ret$Name <- tools::toTitleCase(df_lookthrough_ret$Name)
+
+print(df_lookthrough)
+print(df_lookthrough_ret)
+
+```
+Page 1
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+###  Portfolio Weights Monthly
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+weights_rebal <- extractWeights(bt.opt2)
+weights_rebal <- tibble::rownames_to_column(as.data.frame(weights_rebal), "Date")
+weights_rebal <- tail(weights_rebal,12)
+# Remove ".JO.Close" from column names
+cleaned_names <- sub("\\.JO\\.Close", "", colnames(weights_rebal))
+colnames(weights_rebal) <- cleaned_names
+
+melted_data <- weights_rebal %>%
+    pivot_longer(cols = -Date, names_to = "Ticker", values_to = "Weight")
+
+# Convert weights to percentages
+melted_data$Weight <- round(melted_data$Weight * 100, 2)
+
+
+# Number of unique tickers
+num_tickers <- length(unique(melted_data$Ticker))
+
+# Create a color palette
+colors_palette <- colorRampPalette(brewer.pal(9, "Set3"))(num_tickers)
+
+# Assign a unique color to each ticker from the color palette
+melted_data$color <- factor(melted_data$Ticker)
+levels(melted_data$color) <- colors_palette
+
+# Create an interactive bar chart using plotly
+interactive_chart <- plot_ly(melted_data, x = ~reorder(Date, -Weight), y = ~Weight, type = 'bar',
+                             text = ~paste(Ticker, sprintf("%.2f%%", Weight)),
+                             hoverinfo = 'text',
+                             marker = list(color = ~color)) %>%
+  layout(title = "Recommended Weights - Monthly Rebalancing", 
+         xaxis = list(title = "Date"), 
+         yaxis = list(title = "Weight"),
+         showlegend = FALSE)
+
+interactive_chart
+
+
+```
+Page 2
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+###  Portfolio Weights Quarterly Rebalanced
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+weights_rebal <- extractWeights(bt.opt1)
+weights_rebal <- tibble::rownames_to_column(as.data.frame(weights_rebal), "Date")
+weights_rebal <- tail(weights_rebal,12)
+# Remove ".JO.Close" from column names
+cleaned_names <- sub("\\.JO\\.Close", "", colnames(weights_rebal))
+colnames(weights_rebal) <- cleaned_names
+
+melted_data <- weights_rebal %>%
+    pivot_longer(cols = -Date, names_to = "Ticker", values_to = "Weight")
+
+# Convert weights to percentages
+melted_data$Weight <- round(melted_data$Weight * 100, 2)
+
+# Create text labels for hovering: combining Ticker and Percentage
+melted_data$Hover_text <- paste(melted_data$Ticker, ": ", melted_data$Percentage_inside)
+
+# Create an interactive stacked bar chart
+# Number of unique tickers
+num_tickers <- length(unique(melted_data$Ticker))
+
+# Create a color palette
+colors_palette <- colorRampPalette(brewer.pal(9, "Set3"))(num_tickers)
+
+# Assign a unique color to each ticker from the color palette
+melted_data$color <- factor(melted_data$Ticker)
+levels(melted_data$color) <- colors_palette
+
+# Create an interactive bar chart using plotly
+interactive_chart <- plot_ly(melted_data, x = ~reorder(Date, -Weight), y = ~Weight, type = 'bar',
+                             text = ~paste(Ticker, sprintf("%.2f%%", Weight)),
+                             hoverinfo = 'text',
+                             marker = list(color = ~color)) %>%
+  layout(title = "Recommended Weights - Quarterly Rebalancing", 
+         xaxis = list(title = "Date"), 
+         yaxis = list(title = "Weight"),
+         showlegend = FALSE)
+
+interactive_chart
+
+
+
+```
+Page 3
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+###  Portfolio Weights Monthly and Quarterly Proposed Allocations
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+q_weights <- extractWeights(bt.opt1)
+
+q_weights <- tail(q_weights,1)
+
+# Remove ".JO.Close" from column names
+cleaned_names <- sub("\\.JO\\.Close", "", colnames(q_weights))
+colnames(q_weights) <- cleaned_names
+
+df_transposed_qw <- t(q_weights )
+ 
+ df_transposed_qw <- as.data.frame(df_transposed_qw)
+ df_transposed_qw  <-tibble::rownames_to_column(df_transposed_qw,"Ticker")
+ names(df_transposed_qw)[2]<-"Quarterly_Weight"
+ 
+ m_weights <- extractWeights(bt.opt2)
+
+m_weights <- tail(m_weights,1)
+
+p_weights <- tail(df_weights,1)
+
+# Remove ".JO.Close" from column names
+cleaned_names <- sub("\\.JO\\.Close", "", colnames(m_weights))
+colnames(m_weights) <- cleaned_names
+
+df_transposed_mw <- t(m_weights )
+ 
+ df_transposed_mw <- as.data.frame(df_transposed_mw)
+ df_transposed_mw  <-tibble::rownames_to_column(df_transposed_mw,"Ticker")
+ names(df_transposed_mw)[2]<-"Monthly_Weight"
+ 
+ p_weights <- tail(df_weights,1)
+ df_transposed_pw <- t(p_weights )
+ df_transposed_pw <- as.data.frame(df_transposed_pw)
+ df_transposed_pw  <-tibble::rownames_to_column(df_transposed_pw,"Ticker")
+ names(df_transposed_pw)[2]<-"Holding"
+ 
+ merged_df <- df_transposed_mw%>%left_join(df_transposed_qw,by="Ticker")
+ merged_df <- merged_df%>%left_join(df_transposed_pw,by="Ticker")
+ 
+ 
+ 
+ # Convert weights to percentages
+merged_df$Monthly_Weight <- round(merged_df$Monthly_Weight * 100,2)
+merged_df$Quarterly_Weight <- round(merged_df$Quarterly_Weight * 100,2)
+merged_df$Holding <- round(merged_df$Holding * 100,2)
+# Create an interactive grouped bar chart
+chart <- plot_ly(merged_df, x = ~Ticker) %>%
+  add_trace(y = ~Monthly_Weight, name = "Monthly Weight (%)", type = "bar", text = ~paste("Monthly Weight : ", Monthly_Weight, "%"), hoverinfo = "text") %>%
+  add_trace(y = ~Quarterly_Weight, name = "Quarterly Weight (%)", type = "bar", text = ~paste("Quarterly Weight : ", Quarterly_Weight, "%"), hoverinfo = "text") %>%
+  add_trace(y = ~Holding, name = "Holding (%)", type = "bar", text = ~paste("Holding : ", Holding, "%"), hoverinfo = "text") %>%
+  layout(title = "Actual Portfolio Weights vs Suggested Monthly & Quarterly Weights", xaxis = list(title = "Ticker"), yaxis = list(title = "Weight (%)", tickformat = ".2f"))
+
+# Print the interactive chart
+chart
+
+
+```
+
+Page 4
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Portfolio Performance based on Monthly Rebalancing
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+rr.2 <- Return.portfolio(portfolioReturns, weights = extractWeights(bt.opt2))
+
+
+weights = extractWeights(bt.opt2)
+
+#data <- rownames_to_column(as.data.frame(weights),var = "Date")
+
+  # 1. Create the chart and assign to a variable
+cumulative_returns_chart <- chart.CumReturns(merge(rr.2), plot.engine = "plotly", auto.layout = FALSE, main = "Backtested Portfolio Performance - Monthly Rebalancing")
+
+# 2. Modify the chart using plotly functions
+adjusted_chart <- cumulative_returns_chart %>%
+  layout(yaxis = list(title = "Cumulative Returns (%)", 
+                      tickformat = ".2%", 
+                      tickvals = seq(0, 1, by = 0.05), 
+                      ticktext = sprintf("%.2f%%", seq(0, 100, by = 5))))
+
+# Print the adjusted chart
+adjusted_chart
+
+```
+
+Page 5
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Year to Date Performance
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+#######################################
+# Year to date Calcs 
+#######################################
+
+##################################################################
+# Extract the Price Data Clean and Calculate return
+##################################################################
+
+# Bind portfolio prices 
+portfolioPrices <- NULL
+for(ticker in tickers) {
+    portfolioPrices <- cbind(portfolioPrices,
+                             getSymbols.yahoo(ticker, from='2022-12-31', periodicity = 'daily', auto.assign=FALSE)[,4])
+}
+
+# Columns representing prices for different tickers
+price_columns_to_adjust <- colnames(portfolioPrices)
+
+data <- portfolioPrices
+
+data  <-tibble::rownames_to_column(as.data.frame(data), "Date")
+
+# Apply the function to adjust prices for different tickers
+adjusted_data <- adjust_prices_for_tickers(data, price_columns = price_columns_to_adjust)
+
+# Convert wide dataframe to xts object
+ portfolioPrices <- xts(adjusted_data[,-1], order.by = as.Date(adjusted_data[,1], format = "%Y-%m-%d"))
+ 
+ # Portfolio returns
+portfolioReturns <- na.omit(ROC(portfolioPrices))
+#print(portfolioReturns)
+
+########################################################################
+
+# Remove ".JO.Close" from column names
+cleaned_names <- sub("\\.JO\\.Close", "", colnames(portfolioReturns))
+colnames(portfolioReturns) <- cleaned_names
+
+ my_ret_a <- Return.cumulative(portfolioReturns)
+ 
+df_transposed <- t(my_ret_a)
+ 
+ df_transposed <- as.data.frame(df_transposed)
+ df_transposed  <-tibble::rownames_to_column(df_transposed, "Ticker")
+ #df_transposed
+ 
+
+data <- df_transposed
+# Sort the data by Cumulative Return in descending order
+data <- data[order(-data$`Cumulative Return`), ]
+
+# Define colors based on positive/negative Cumulative Return
+colors <- ifelse(data$`Cumulative Return` >= 0, "green", "red")
+
+# Create an interactive bar chart using plotly
+interactive_chart <- plot_ly(data, x = ~reorder(Ticker, -`Cumulative Return`), y = ~`Cumulative Return`, type = 'bar',
+                             text = ~paste(Ticker, sprintf("%.2f%%", `Cumulative Return` * 100)),
+                             hoverinfo = 'text',
+                             marker = list(color = colors)) %>%
+  layout(title = "Year to Date Returns all ETFs", 
+         xaxis = list(title = "Ticker"), 
+         yaxis = list(title = "Cumulative Return (%)", 
+                      tickformat = ".2%", 
+                      tickvals = seq(0, 1, by = 0.05), 
+                      ticktext = sprintf("%.2f%%", seq(0, 100, by = 5))
+                      ),
+         showlegend = FALSE)
+
+# Print the chart
+interactive_chart
+
+
+```
+
+Page 6
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Drawdowns based on Year to date 
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+chart_output <- chart.Drawdown(portfolioReturns, plot.engine = "plotly", main = "Year to Date Drawdowns All ETFs")
+
+chart_output <- chart_output %>% 
+  layout(yaxis = list(tickformat = ".0%", tickvals = seq(-0.28, 0, by = 0.02), ticktext = sprintf("%.2f%%", seq(-28, 0, by = 2))))
+
+chart_output
+
+
+```
+
+Page 7
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Easy Equities TFSA Portfolio Performance
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+
+# Assuming you have a data frame df_portfolio_ret with returns data
+cumulative_returns_chart <- chart.CumReturns(df_portfolio_ret, plot.engine = "plotly", main = "Easy Equities TFSA Portfolio Performance Since Inception")
+
+# Create the chart with custom y-axis formatting
+updated_cumulative_returns_chart <- cumulative_returns_chart %>%
+  layout(
+    yaxis = list(
+      tickformat = ".2%",  # Display values as percentages with 2 decimal places
+      title = "Cumulative Returns",
+      tickvals = seq(0, 1, by = 0.2)  # Customize tick values if needed
+    )
+  )
+
+# Show the updated chart
+updated_cumulative_returns_chart
+
+
+```
+
+Page 8
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Easy Equities TFSA Portfolio Drawdowns  
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+
+# Assuming you have a data frame df_portfolio_ret with returns data
+drawdowns_chart <- chart.Drawdown(df_portfolio_ret, plot.engine = "plotly", main = "Easy Equities TFSA Drawdowns Since Inception")
+
+# Create the chart with custom y-axis formatting and fill colors
+updated_drawdowns_chart <- drawdowns_chart %>%
+  layout(
+    yaxis = list(
+      tickformat = ".2%",  # Display values as percentages with 2 decimal places
+      title = "Drawdowns",
+      tickvals = seq(-0.20, 0, by = 0.05)  # Customize tick values as needed
+    ),
+    shapes = list(
+      # Fill area between 0% and -10% with green
+      list(
+        type = "rect",
+        xref = "paper",
+        x0 = 0,
+        x1 = 1,
+        y0 = 0,
+        y1 = -0.10,
+        fillcolor = "green",
+        opacity = 0.3,
+        layer = "below",
+        line = list(width = 0)
+      ),
+      # Fill area between -10% and -20% with red
+      list(
+        type = "rect",
+        xref = "paper",
+        x0 = 0,
+        x1 = 1,
+        y0 = -0.10,
+        y1 = -0.20,  # Adjust this to -20% or any other desired value
+        fillcolor = "red",
+        opacity = 0.3,
+        layer = "below",
+        line = list(width = 0)
+      )
+    )
+  )
+
+# Show the updated chart
+updated_drawdowns_chart
+
+
+```
+Page 9
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Portfolio Value at Risk
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+library(DT)
+library(formattable)
+
+df_drawdowns.table <- table.Drawdowns(df_portfolio_ret)
+
+# Convert Depth values to percentages
+df_drawdowns.table$Depth <- df_drawdowns.table$Depth * 100
+
+datatable(df_drawdowns.table, options = list(
+  paging = TRUE,
+  searching = TRUE,
+  pageLength = 10,  # Display 10 rows per page
+  dom = 'tp',      # Show only table and pagination controls
+  columnDefs = list(list(
+    targets = which(names(df_drawdowns.table) == "Depth"),
+    render = JS("function(data, type, row, meta) {
+                return type === 'display' && data !== null ? data.toFixed(2) + '%' : data;
+              }")
+  )),
+  initComplete = JS(
+    "function(settings, json) {",
+    "$(this.api().table().body()).css({",
+    "fontWeight: 'bold',",
+    "fontSize: '16px',",
+    "fontFamily: 'Courier New, Courier, monospace'",
+    "});",
+    "}"
+  )
+)) %>%
+  formatStyle('Depth', backgroundColor = 'lightcoral')  # Setting background color of Depth column to light red
+
+
+```
+Page 10
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Portfolio Value at Risk
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+# Assuming df_VaR_df is your data frame and it has columns 'Date' and 'Returns'
+
+# Create an interactive time series plot
+interactive_chart <- df_VaR_df %>%
+  plot_ly() %>%
+  add_lines(x = ~Date, y = ~`Daily Returns`, name = "Daily Returns") %>%
+  add_lines(x = ~Date, y = ~`Daily Value at Risk`, name = "Daily Value at Risk") %>%
+  layout(title = "99% Daily VaR vs. Daily Returns",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Percentage (%)", tickformat = ".2%"))
+
+# Print the chart
+interactive_chart
+
+
+```
+
+Page 11
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Calendar Returns
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+library(DT)
+library(formattable)
+
+# Assuming you have the df_calendar data frame
+datatable(df_calendar) %>%
+  formatStyle(
+    columns = colnames(df_calendar[2:15]),  # Exclude the "Year" column
+    color = styleInterval(cuts = 0, values = c("red", "green")),
+    fontWeight = "bold",
+    fontSize = "16px",  # Set the font size for data columns
+    fontFamily = "Courier New, Courier, monospace"  # Set the font family for data columns
+  ) %>%
+  formatStyle(
+    columns = "Year",  # Apply formatting to the "Year" column
+    fontSize = "16px",  # Set a different font size for the "Year" column
+    fontWeight = "bold",  # Optional: Set font weight for the "Year" column
+    fontFamily = "Courier New, Courier, monospace"  # Set the font family for the "Year" column
+  )
+
+```
+Page 12
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Portfolio Contribution to Returns
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+### Calculate contribution to Returns 
+
+df_ret_cont <- df_weights*df_returns
+
+df_ret_contribution <-  Return.cumulative(df_ret_cont)
+		 
+		 
+		 df_ret_transposed <- t(df_ret_contribution )
+ 
+ df_ret_transposed <- as.data.frame(df_ret_transposed)
+ df_ret_transposed  <-tibble::rownames_to_column(df_ret_transposed, "Ticker")
+ #df_ret_transposed
+ 
+
+data <- df_ret_transposed
+# Sort the data by Cumulative Return in descending order
+data <- data[order(-data$`Cumulative Return`), ]
+
+# Define colors based on positive/negative Cumulative Return
+colors <- ifelse(data$`Cumulative Return` >= 0, "green", "red")
+
+# Create an interactive bar chart using plotly
+interactive_chart <- plot_ly(data, x = ~reorder(Ticker, -`Cumulative Return`), y = ~`Cumulative Return`, type = 'bar',
+                              text = ~paste(Ticker, sprintf("%.2f%%", `Cumulative Return` * 100)),
+                              hoverinfo = 'text',
+                              marker = list(color = colors)) %>%
+  layout(title = "Contribution to Returns Since Inception", 
+         xaxis = list(title = "Ticker"), 
+         yaxis = list(title = "Cumulative Return (%)",
+                      tickformat = "%", # Format y-axis ticks as percentages
+                      tickvals = seq(0, 1, by = 0.1), # You can adjust this if needed
+                      ticktext = c("0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%")), # You can adjust this if needed
+         showlegend = FALSE)
+
+# Print the chart
+interactive_chart
+
+
+```
+Page 13
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Portfolio holdings on a lookthrough basis
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+library(plotly)
+library(scales)
+
+# Filter the top 20 holdings based on Weight
+top_20 <- df_lookthrough %>%
+  arrange(desc(Weight)) %>%
+  head(20)
+
+# Generate a gradient of colors for the bars based on their Weight value
+colors <- scales::seq_gradient_pal("green", "purple", "Lab")(seq(0, 1, length.out = nrow(top_20)))
+
+# Create an interactive bar chart with gradient colors based on Weight
+plot_ly(data = top_20, 
+        x = ~Name, 
+        y = ~Weight, 
+        type = "bar",
+        text = ~paste(Name, ": ", sprintf("%.2f%%", Weight)), # Formatting with two decimal places
+        hoverinfo = "text",
+        marker = list(color = colors, line = list(color = 'rgb(8,48,107)', width = 1.5))) %>%
+  layout(title = "Top 20 Holdings by Weight",
+         xaxis = list(title = "Holdings", categoryorder = "total descending"),
+         yaxis = list(title = "Weight (%)", tickformat = ".2f")) # Display values with two decimal places
+
+
+
+```
+Page 14
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Contribution to returns on a lookthrough basis
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+library(plotly)
+library(scales)
+
+# Filter the top 20 holdings based on Return
+top_20 <- df_lookthrough_ret %>%
+  arrange(desc(Return)) %>%
+  head(20)
+
+# Generate a gradient of colors for the bars based on their Return value
+colors <- scales::seq_gradient_pal("red", "blue", "Lab")(seq(0, 1, length.out = nrow(top_20)))
+
+# Create interactive bar chart with gradient colors based on Return
+plot_ly(data = top_20, 
+        x = ~Name, 
+        y = ~Return, 
+        type = "bar",
+        text = ~paste(Name, ": ", sprintf("%.2f", Return), "%"), # Formatting with two decimal places
+        hoverinfo = "text",
+        marker = list(color = colors, line = list(color = 'rgb(8,48,107)', width = 1.5))) %>%
+  layout(title = "Top 20 Holdings by Return",
+         xaxis = list(title = "Holdings", categoryorder = "total descending"),
+         yaxis = list(title = "Return (%)", tickformat = ".2f")) # Display values with two decimal places
+
+
+```
+Page 15
+================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Lookthrough Holdings and Returns
+
+```{r message=FALSE, warning=FALSE, echo=FALSE,fig.height=8, fig.width=14}
+
+df_holdings <- result_df%>%select(representative_name,Identifier,LookThrough_Weight,LookThrough_Return)
+
+colnames(df_holdings)[1] <- "Name"
+colnames(df_holdings)[2] <- "ETF"
+colnames(df_holdings)[3] <- "Weight"
+colnames(df_holdings)[4] <- "Return"
+
+df_holdings$Name <- tools::toTitleCase(df_holdings$Name)
+
+
+# Group by Name and then summarize the values
+company_summary <- df_holdings %>%
+    group_by(Name) %>%
+    summarise(
+        Total_Weight = sum(Weight, na.rm = TRUE),
+        Total_Return = sum(Return, na.rm = TRUE)
+    )
+
+# Join the summary with the original data and rename to df_detailed_summary
+df_detailed_summary <- df_holdings %>%
+    left_join(company_summary, by = "Name") %>%
+    arrange(desc(Total_Return), desc(Total_Weight), Name, ETF)
+
+# Convert the percentage columns to numeric
+df_detailed_summary$Weight_numeric <- as.numeric(sub("%", "", df_detailed_summary$Weight)) / 100
+df_detailed_summary$Return_numeric <- as.numeric(sub("%", "", df_detailed_summary$Return)) / 100
+df_detailed_summary$Total_Weight_numeric <- as.numeric(sub("%", "", df_detailed_summary$Total_Weight)) / 100
+df_detailed_summary$Total_Return_numeric <- as.numeric(sub("%", "", df_detailed_summary$Total_Return)) / 100
+
+# Now, format the columns as percentages or "NA%"
+df_detailed_summary$Weight <- ifelse(
+  is.na(df_detailed_summary$Weight_numeric), 
+  "NA%", 
+  sprintf("%.2f%%", 100 * df_detailed_summary$Weight_numeric)
+)
+df_detailed_summary$Return <- sprintf("%.2f%%", 100 * df_detailed_summary$Return_numeric)
+df_detailed_summary$Total_Weight <- sprintf("%.2f%%", 100 * df_detailed_summary$Total_Weight_numeric)
+df_detailed_summary$Total_Return <- sprintf("%.2f%%", 100 * df_detailed_summary$Total_Return_numeric)
+
+
+styled_table <- datatable(df_detailed_summary %>% select(Name, ETF, Weight, Return, Total_Weight, Total_Return),
+                          extensions = 'RowGroup',
+                          options = list(
+                              pageLength = 25, 
+                              autoWidth = TRUE,
+                              rowGroup = list(dataSrc = 0)  # Group by the first column (Name)
+                          ))
+
+styled_table %>%
+  formatStyle(columns = 'Weight',
+              backgroundColor = styleInterval(cuts = c(0),
+                                              values = c('red', 'white')),
+              target = 'cell',
+              fontWeight = "bold",
+              fontSize = "16px",
+              fontFamily = "Courier New, Courier, monospace") %>%
+  formatStyle(columns = c('Name', 'ETF', 'Return', 'Total_Weight', 'Total_Return'),
+              fontWeight = "bold",
+              fontSize = "16px",
+              fontFamily = "Courier New, Courier, monospace")
+
+
+```
+
+
